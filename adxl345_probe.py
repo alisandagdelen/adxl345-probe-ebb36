@@ -19,17 +19,24 @@ class ADXL345Probe:
         gcode_macro = self.printer.load_object(config, 'gcode_macro')
         self.activate_gcode = gcode_macro.load_template(config, 'activate_gcode', '')
         self.deactivate_gcode = gcode_macro.load_template(config, 'deactivate_gcode', '')
-        int_pin = config.get('int_pin').strip()
+        
         self.inverted = False
         self.is_measuring = False
-        if int_pin.startswith('!'):
-            self.inverted = True
-            int_pin = int_pin[1:].strip()
-        if int_pin != 'int1' and int_pin != 'int2':
-            raise config.error('int_pin must specify one of int1 or int2 pins')
+        self.use_polling = config.getboolean('use_polling', True)
+        
+        if not self.use_polling:
+            int_pin = config.get('int_pin').strip()
+            if int_pin.startswith('!'):
+                self.inverted = True
+                int_pin = int_pin[1:].strip()
+            if int_pin != 'int1' and int_pin != 'int2':
+                raise config.error('int_pin must specify one of int1 or int2 pins')
+            self.int_map = 0x40 if int_pin == 'int2' else 0x0
+        else:
+            self.int_map = 0x0
+            
         probe_pin = config.get('probe_pin')
         adxl345_name = config.get('chip', 'adxl345')
-        self.int_map = 0x40 if int_pin == 'int2' else 0x0
         self.tap_thresh = config.getfloat('tap_thresh', 5000, minval=TAP_SCALE, maxval=100000.)
         self.tap_dur = config.getfloat('tap_dur', 0.01, above=DUR_SCALE, maxval=0.1)
         self.position_endstop = config.getfloat('z_offset')
@@ -124,6 +131,11 @@ class ADXL345Probe:
             tries -= 1
         return False
 
+    def _poll_for_tap(self):
+        chip = self.adxl345
+        val = chip.read_reg(REG_INT_SOURCE)
+        return bool(val & 0x40)
+
     def probe_prepare(self, hmove):
         self.activate_gcode.run_gcode_from_command()
         chip = self.adxl345
@@ -132,9 +144,14 @@ class ADXL345Probe:
         toolhead.dwell(ADXL345_REST_TIME)
         print_time = toolhead.get_last_move_time()
         clock = self.adxl345.mcu.print_time_to_clock(print_time)
-        chip.set_reg(REG_INT_ENABLE, 0x00, minclock=clock)
-        chip.read_reg(REG_INT_SOURCE)
-        chip.set_reg(REG_INT_ENABLE, 0x40, minclock=clock)
+        
+        if self.use_polling:
+            chip.set_reg(REG_INT_ENABLE, 0x40, minclock=clock)
+        else:
+            chip.set_reg(REG_INT_ENABLE, 0x00, minclock=clock)
+            chip.read_reg(REG_INT_SOURCE)
+            chip.set_reg(REG_INT_ENABLE, 0x40, minclock=clock)
+            
         self.is_measuring = (chip.read_reg(adxl345.REG_POWER_CTL) == 0x08)
         if not self.is_measuring:
             chip.set_reg(adxl345.REG_POWER_CTL, 0x08, minclock=clock)
